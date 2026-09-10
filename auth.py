@@ -140,7 +140,7 @@ def demande_reset_form():
                 email_r = email_r.strip().lower()
                 token = generate_reset_token(email_r)
                 if token:
-                    app_url = _get_secret("APP_URL") or "http://localhost:8501"
+                    app_url = _get_secret("https://bizstock.streamlit.app/") or "http://localhost:8501"
                     lien = f"{app_url}?reset_email={quote(email_r)}&reset_token={token}"
                     corps = (
                         "Bonjour,\n\n"
