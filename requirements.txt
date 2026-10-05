@@ -4,3 +4,5 @@ reportlab
 sqlalchemy
 psycopg2-binary
 bcrypt
+psycopg
+psycopg2
