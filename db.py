@@ -56,6 +56,9 @@ def init_schema():
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS has_paid BOOLEAN DEFAULT FALSE"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_checkout_id TEXT"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE"))
+        # Abonnement mensuel : date (UTC) jusqu'à laquelle l'accès est ouvert
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS paid_until TIMESTAMP"))
+
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS produits (
                 id SERIAL PRIMARY KEY,
@@ -80,5 +83,44 @@ def init_schema():
                 motif TEXT
             )
         """))
+
+        # --- Paiements d'abonnement (GeniusPay) : une ligne par tentative, créditée une seule fois ---
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS paiements_abonnement (
+                reference TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                amount NUMERIC NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                credited BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+
+        # --- Cahier de crédit ---
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS clients_credit (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                nom TEXT NOT NULL,
+                telephone TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS credit_operations (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                client_id INTEGER NOT NULL REFERENCES clients_credit(id) ON DELETE CASCADE,
+                type TEXT NOT NULL CHECK (type IN ('dette', 'remboursement')),
+                montant NUMERIC NOT NULL CHECK (montant > 0),
+                note TEXT,
+                produit_id INTEGER REFERENCES produits(id) ON DELETE SET NULL,
+                date TIMESTAMP DEFAULT NOW()
+            )
+        """))
+
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_produits_user ON produits(user_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_mouvements_user ON mouvements(user_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clients_credit_user ON clients_credit(user_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_credit_ops_client ON credit_operations(client_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_paiements_user ON paiements_abonnement(user_id)"))

@@ -1,7 +1,6 @@
 """
 Gestionnaire de Stock - Application Streamlit (multi-utilisateurs)
-Stockage des données sur Neon (PostgreSQL)
-Export des rapports en PDF
+Stockage sur Neon (PostgreSQL) · Abonnement mensuel via GeniusPay · Cahier de crédit · Export PDF
 """
 
 import streamlit as st
@@ -18,13 +17,13 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 from db import get_engine, init_schema
 from auth import login_form, logout_button, handle_password_reset_page
-from payment import paywall, handle_payment_return
+from payment import paywall, handle_payment_return, renouveler_sidebar
+from credit import page_credit, lister_clients
+from theme import (inject_theme, hero, section, kpi_grid, row_card_html, render_rows,
+                   show_flash, flash, esc, fcfa, TONES)
 
 st.set_page_config(page_title="Gestion de Stock Boutique Samba", page_icon="📦", layout="wide")
-
-# Prix d'accès unique — ajuste selon ton offre
-PRIX_ACCES = "1000"
-DEVISE_ACCES = "XOF"
+inject_theme()
 
 init_schema()
 
@@ -37,23 +36,41 @@ if handle_payment_return():
 if not login_form():
     st.stop()
 
-logout_button()
-user_id = st.session_state["user"]["id"]
-est_admin = st.session_state["user"].get("is_admin", False)
+user = st.session_state["user"]
+user_id = user["id"]
+est_admin = user.get("is_admin", False)
+nom_boutique = user.get("nom_boutique") or "Ma boutique"
 engine = get_engine()
 
-if not est_admin and paywall(user_id, amount=PRIX_ACCES, currency=DEVISE_ACCES):
+with st.sidebar:
+    st.markdown(
+        '<div class="brand"><div class="logo">◈</div>'
+        f'<div><div class="t">Gestion de Stock</div><div class="s">{esc(nom_boutique)}</div></div></div>',
+        unsafe_allow_html=True,
+    )
+logout_button()
+
+if not est_admin and paywall(user_id, user["email"], user.get("nom_boutique")):
     st.stop()
+
+with st.sidebar:
+    if est_admin:
+        st.markdown(f'<span class="pill" style="--c:{TONES["lime"]}">👑 Accès admin</span>', unsafe_allow_html=True)
+    else:
+        renouveler_sidebar(user)
+    st.divider()
 
 
 # ----------------------------------------------------------------------
 # FONCTIONS DE GESTION DES DONNEES (Neon / PostgreSQL, filtrées par utilisateur)
 # ----------------------------------------------------------------------
 def charger_stock() -> pd.DataFrame:
-    return pd.read_sql_query(
+    df = pd.read_sql_query(
         text("SELECT * FROM produits WHERE user_id = :uid ORDER BY id"),
         engine, params={"uid": user_id}
     )
+    df["prix_unitaire"] = df["prix_unitaire"].astype(float)
+    return df
 
 
 def charger_mouvements() -> pd.DataFrame:
@@ -98,13 +115,16 @@ def enregistrer_mouvement(produit_id, produit_nom, type_mvt, quantite, motif):
 # ----------------------------------------------------------------------
 # GENERATION PDF
 # ----------------------------------------------------------------------
+COULEUR_ENTETE_PDF = colors.HexColor("#0B3D2E")
+
+
 def generer_pdf_stock(df: pd.DataFrame) -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
     styles = getSampleStyleSheet()
     elements = []
 
-    elements.append(Paragraph("Rapport d'inventaire", styles["Title"]))
+    elements.append(Paragraph(f"Rapport d'inventaire — {nom_boutique}", styles["Title"]))
     elements.append(Paragraph(f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}", styles["Normal"]))
     elements.append(Spacer(1, 20))
 
@@ -123,7 +143,7 @@ def generer_pdf_stock(df: pd.DataFrame) -> bytes:
 
     table = Table(data, repeatRows=1)
     table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+        ("BACKGROUND", (0, 0), (-1, 0), COULEUR_ENTETE_PDF),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
@@ -143,7 +163,7 @@ def generer_pdf_mouvements(df: pd.DataFrame) -> bytes:
     styles = getSampleStyleSheet()
     elements = []
 
-    elements.append(Paragraph("Historique des mouvements de stock", styles["Title"]))
+    elements.append(Paragraph(f"Historique des mouvements de stock — {nom_boutique}", styles["Title"]))
     elements.append(Paragraph(f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}", styles["Normal"]))
     elements.append(Spacer(1, 20))
 
@@ -154,7 +174,7 @@ def generer_pdf_mouvements(df: pd.DataFrame) -> bytes:
 
     table = Table(data, repeatRows=1)
     table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+        ("BACKGROUND", (0, 0), (-1, 0), COULEUR_ENTETE_PDF),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
@@ -171,57 +191,92 @@ def generer_pdf_mouvements(df: pd.DataFrame) -> bytes:
 # ----------------------------------------------------------------------
 # NAVIGATION
 # ----------------------------------------------------------------------
-st.sidebar.title("📦 Gestion de Stock")
-page = st.sidebar.radio(
-    "Menu",
-    ["Tableau de bord", "Ajouter un produit", "Entrée / Sortie de stock",
-     "Liste des produits", "Historique des mouvements"]
-)
+PAGES = [
+    "📊 Tableau de bord",
+    "💳 Cahier de crédit",
+    "➕ Ajouter un produit",
+    "🔁 Entrée / Sortie de stock",
+    "📦 Liste des produits",
+    "🕘 Historique des mouvements",
+]
+page = st.sidebar.radio("Menu", PAGES, label_visibility="collapsed")
 
 stock = charger_stock()
 
 # ----------------------------------------------------------------------
 # PAGE : TABLEAU DE BORD
 # ----------------------------------------------------------------------
-if page == "Tableau de bord":
-    nom_boutique = st.session_state["user"].get("nom_boutique") or "Ma boutique"
-    st.title(f"Tableau de bord — {nom_boutique}")
+if page == PAGES[0]:
+    hero(f"Tableau de bord — {nom_boutique}", "Ton stock, tes alertes et tes crédits clients en un coup d'œil.", badge="En direct")
+    show_flash()
+
+    clients = lister_clients(engine, user_id)
+    total_credit = float(clients.loc[clients["solde"] > 0, "solde"].sum()) if not clients.empty else 0.0
 
     if stock.empty:
+        kpi_grid([
+            {"label": "Produits", "value": "0", "tone": "mint"},
+            {"label": "Valeur du stock", "value": fcfa(0), "tone": "lime"},
+            {"label": "Alertes", "value": "0", "tone": "amber"},
+            {"label": "Crédits à recouvrer", "value": fcfa(total_credit), "tone": "coral"},
+        ])
         st.info("Aucun produit enregistré pour le moment. Ajoute ton premier produit dans le menu à gauche.")
     else:
-        nb_produits = len(stock)
-        valeur_totale = (stock["quantite"] * stock["prix_unitaire"]).sum()
+        valeur_totale = float((stock["quantite"] * stock["prix_unitaire"]).sum())
         produits_alerte = stock[stock["quantite"] <= stock["seuil_alerte"]]
+        kpi_grid([
+            {"label": "Produits", "value": str(len(stock)), "tone": "mint", "sub": f"{int(stock['quantite'].sum())} unités en stock"},
+            {"label": "Valeur du stock", "value": fcfa(valeur_totale), "tone": "lime", "sub": "au prix de vente"},
+            {"label": "Alertes", "value": str(len(produits_alerte)), "tone": "amber", "sub": "à réapprovisionner"},
+            {"label": "Crédits à recouvrer", "value": fcfa(total_credit), "tone": "coral", "sub": f"{int((clients['solde'] > 0).sum()) if not clients.empty else 0} client(s)"},
+        ])
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Nombre de produits", nb_produits)
-        col2.metric("Valeur totale du stock", f"{valeur_totale:,.0f} FCFA")
-        col3.metric("Produits en alerte", len(produits_alerte))
-
-        st.subheader("Quantité en stock par catégorie")
-        par_categorie = stock.groupby("categorie")["quantite"].sum()
-        st.bar_chart(par_categorie)
-
-        if not produits_alerte.empty:
-            st.subheader("⚠️ Produits à réapprovisionner")
-            st.dataframe(produits_alerte, use_container_width=True)
+        gauche, droite = st.columns([3, 2], gap="large")
+        with gauche:
+            section("Quantité en stock par catégorie")
+            par_categorie = stock.groupby("categorie")["quantite"].sum()
+            try:
+                st.bar_chart(par_categorie, color="#00F5A0")
+            except TypeError:  # anciennes versions de Streamlit sans paramètre color
+                st.bar_chart(par_categorie)
+        with droite:
+            section("À réapprovisionner")
+            if produits_alerte.empty:
+                st.caption("Rien à signaler, tous les stocks sont au-dessus du seuil.")
+            else:
+                render_rows([
+                    row_card_html(p["nom"], f"seuil : {int(p['seuil_alerte'])}", f"{int(p['quantite'])} restant(s)",
+                                  "coral" if p["quantite"] == 0 else "amber")
+                    for _, p in produits_alerte.head(6).iterrows()
+                ])
+            if not clients.empty and total_credit > 0:
+                section("Top débiteurs")
+                render_rows([
+                    row_card_html(c["nom"], c["telephone"] or "—", fcfa(c["solde"]), "coral")
+                    for _, c in clients[clients["solde"] > 0].head(4).iterrows()
+                ])
 
         st.divider()
-        st.subheader("📄 Export PDF")
-        pdf_bytes = generer_pdf_stock(stock)
         st.download_button(
-            "Télécharger le rapport d'inventaire (PDF)",
-            data=pdf_bytes,
+            "📄 Télécharger le rapport d'inventaire (PDF)",
+            data=generer_pdf_stock(stock),
             file_name=f"rapport_stock_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-            mime="application/pdf"
+            mime="application/pdf",
+            type="primary",
         )
+
+# ----------------------------------------------------------------------
+# PAGE : CAHIER DE CREDIT
+# ----------------------------------------------------------------------
+elif page == PAGES[1]:
+    page_credit(engine, user_id, stock, nom_boutique)
 
 # ----------------------------------------------------------------------
 # PAGE : AJOUTER UN PRODUIT
 # ----------------------------------------------------------------------
-elif page == "Ajouter un produit":
-    st.title("Ajouter un nouveau produit")
+elif page == PAGES[2]:
+    hero("Ajouter un produit", "Renseigne le produit, son prix et le seuil qui déclenche l'alerte.")
+    show_flash()
 
     with st.form("form_ajout"):
         nom = st.text_input("Nom du produit")
@@ -229,21 +284,22 @@ elif page == "Ajouter un produit":
         quantite = st.number_input("Quantité initiale", min_value=0, step=1)
         prix = st.number_input("Prix unitaire (FCFA)", min_value=0.0, step=100.0)
         seuil = st.number_input("Seuil d'alerte (stock bas)", min_value=0, step=1, value=5)
-        valider = st.form_submit_button("Ajouter le produit")
+        valider = st.form_submit_button("Ajouter le produit", type="primary")
 
         if valider:
             if not nom.strip():
                 st.error("Le nom du produit est obligatoire.")
             else:
                 ajouter_produit(nom.strip(), categorie.strip() if categorie else "Non classé", quantite, prix, seuil)
-                st.success(f"Produit '{nom}' ajouté avec succès.")
+                flash(f"Produit « {nom.strip()} » ajouté avec succès.")
                 st.rerun()
 
 # ----------------------------------------------------------------------
 # PAGE : ENTREE / SORTIE DE STOCK
 # ----------------------------------------------------------------------
-elif page == "Entrée / Sortie de stock":
-    st.title("Mouvement de stock")
+elif page == PAGES[3]:
+    hero("Mouvement de stock", "Enregistre un réapprovisionnement ou une vente.")
+    show_flash()
 
     if stock.empty:
         st.warning("Ajoute d'abord des produits avant d'enregistrer un mouvement.")
@@ -255,16 +311,16 @@ elif page == "Entrée / Sortie de stock":
 
         st.write(f"Stock actuel : **{int(ligne['quantite'])}** unité(s)")
 
-        type_mvt = st.radio("Type de mouvement", ["Entrée (réapprovisionnement)", "Sortie (vente)"])
+        type_mvt = st.radio("Type de mouvement", ["Entrée (réapprovisionnement)", "Sortie (vente)"], horizontal=True)
         quantite_mvt = st.number_input("Quantité", min_value=1, step=1)
         motif = st.text_input("Motif / commentaire (optionnel)")
 
-        if st.button("Valider le mouvement"):
+        if st.button("Valider le mouvement", type="primary"):
             if "Entrée" in type_mvt:
                 nouvelle_quantite = int(ligne["quantite"]) + quantite_mvt
                 modifier_quantite(produit_id, nouvelle_quantite)
                 enregistrer_mouvement(produit_id, ligne["nom"], "Entrée", quantite_mvt, motif)
-                st.success(f"{quantite_mvt} unité(s) ajoutée(s) au stock de '{ligne['nom']}'.")
+                flash(f"{quantite_mvt} unité(s) ajoutée(s) au stock de « {ligne['nom']} ».")
             else:
                 if quantite_mvt > ligne["quantite"]:
                     st.error("Quantité insuffisante en stock pour cette sortie.")
@@ -272,15 +328,16 @@ elif page == "Entrée / Sortie de stock":
                 nouvelle_quantite = int(ligne["quantite"]) - quantite_mvt
                 modifier_quantite(produit_id, nouvelle_quantite)
                 enregistrer_mouvement(produit_id, ligne["nom"], "Sortie", quantite_mvt, motif)
-                st.success(f"{quantite_mvt} unité(s) retirée(s) du stock de '{ligne['nom']}'.")
+                flash(f"{quantite_mvt} unité(s) retirée(s) du stock de « {ligne['nom']} ».")
 
             st.rerun()
 
 # ----------------------------------------------------------------------
 # PAGE : LISTE DES PRODUITS
 # ----------------------------------------------------------------------
-elif page == "Liste des produits":
-    st.title("Liste des produits")
+elif page == PAGES[4]:
+    hero("Liste des produits", "Recherche, consulte et supprime tes produits.")
+    show_flash()
 
     if stock.empty:
         st.info("Aucun produit enregistré.")
@@ -294,35 +351,40 @@ elif page == "Liste des produits":
             )
             affichage = affichage[masque]
 
-        st.dataframe(affichage.drop(columns=["label"], errors="ignore"), use_container_width=True)
+        colonnes = {"id": "ID", "nom": "Produit", "categorie": "Catégorie", "quantite": "Quantité",
+                    "prix_unitaire": "Prix unitaire", "seuil_alerte": "Seuil", "derniere_maj": "Dernière MAJ"}
+        st.dataframe(affichage[list(colonnes)].rename(columns=colonnes), hide_index=True)
 
-        st.subheader("Supprimer un produit")
+        section("Supprimer un produit")
         if not affichage.empty:
             affichage["label"] = affichage["id"].astype(str) + " - " + affichage["nom"]
             a_supprimer = st.selectbox("Choisir un produit à supprimer", affichage["label"])
-            if st.button("🗑️ Supprimer", type="secondary"):
-                id_a_supprimer = int(a_supprimer.split(" - ")[0])
-                supprimer_produit(id_a_supprimer)
-                st.success("Produit supprimé.")
-                st.rerun()
+            if st.checkbox("Je confirme la suppression de ce produit", key="confirm_suppr_produit"):
+                if st.button("🗑️ Supprimer"):
+                    supprimer_produit(int(a_supprimer.split(" - ")[0]))
+                    st.session_state.pop("confirm_suppr_produit", None)
+                    flash("Produit supprimé.")
+                    st.rerun()
 
 # ----------------------------------------------------------------------
 # PAGE : HISTORIQUE DES MOUVEMENTS
 # ----------------------------------------------------------------------
-elif page == "Historique des mouvements":
-    st.title("Historique des mouvements de stock")
+elif page == PAGES[5]:
+    hero("Historique des mouvements", "Toutes les entrées et sorties de stock, de la plus récente à la plus ancienne.")
+    show_flash()
 
     mouvements = charger_mouvements()
     if mouvements.empty:
         st.info("Aucun mouvement enregistré pour le moment.")
     else:
-        st.dataframe(mouvements, use_container_width=True)
+        colonnes = {"date": "Date", "produit_nom": "Produit", "type": "Type", "quantite": "Quantité", "motif": "Motif"}
+        st.dataframe(mouvements[list(colonnes)].rename(columns=colonnes), hide_index=True)
 
         st.divider()
-        pdf_bytes = generer_pdf_mouvements(mouvements)
         st.download_button(
-            "Télécharger l'historique (PDF)",
-            data=pdf_bytes,
+            "📄 Télécharger l'historique (PDF)",
+            data=generer_pdf_mouvements(mouvements),
             file_name=f"mouvements_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-            mime="application/pdf"
+            mime="application/pdf",
+            type="primary",
         )
