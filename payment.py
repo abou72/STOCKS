@@ -189,12 +189,11 @@ def handle_payment_return() -> bool:
     dernier = _dernier_paiement(user_id)
 
     if not dernier:
-        st.error("Aucun paiement en cours trouvé pour ce compte.")
+        st.error("Aucun paiement à vérifier.")
     elif params["payment"] != "success":
         st.error("Le paiement a été annulé ou a échoué. Tu peux réessayer depuis l'application.")
     elif dernier.credited:
-        info = abonnement_info(user_id)
-        st.success(f"Paiement confirmé. Ton abonnement est actif jusqu'au {_fmt_date(info['paid_until'])}.")
+        st.success("Paiement confirmé. Connecte-toi pour accéder à l'application.")
     else:
         try:
             statut = verifier_et_crediter(dernier.reference, user_id)
@@ -202,8 +201,7 @@ def handle_payment_return() -> bool:
             st.error(str(e))
         else:
             if statut == "completed":
-                info = abonnement_info(user_id)
-                st.success(f"Paiement confirmé. Ton abonnement est actif jusqu'au {_fmt_date(info['paid_until'])}.")
+                st.success("Paiement confirmé. Connecte-toi pour accéder à l'application.")
             elif statut in ("pending", "processing"):
                 st.warning("Paiement pas encore confirmé. Si tu viens de payer, patiente quelques secondes puis vérifie à nouveau.")
                 if st.button("Vérifier à nouveau", type="primary"):

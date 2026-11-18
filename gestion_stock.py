@@ -17,12 +17,15 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 from db import get_engine, init_schema
 from auth import login_form, logout_button, handle_password_reset_page
-from payment import paywall, handle_payment_return, renouveler_sidebar
+from payment import paywall, handle_payment_return, renouveler_sidebar, abonnement_info
+from legal import consentement_a_jour, ecran_consentement, page_confidentialite
 from credit import page_credit, lister_clients
-from theme import (inject_theme, hero, section, kpi_grid, row_card_html, render_rows,
-                   show_flash, flash, esc, fcfa, TONES)
+from PIL import Image
 
-st.set_page_config(page_title="Gestion de Stock Boutique Samba", page_icon="📦", layout="wide")
+from theme import (inject_theme, hero, section, kpi_grid, row_card_html, render_rows, show_flash, flash,
+                   esc, fcfa, TONES, sidebar_brand, ticker, health_ring, pdf_logo, logo_path)
+
+st.set_page_config(page_title="BizStock", page_icon=Image.open(logo_path("icon")), layout="wide")
 inject_theme()
 
 init_schema()
@@ -43,14 +46,23 @@ nom_boutique = user.get("nom_boutique") or "Ma boutique"
 engine = get_engine()
 
 with st.sidebar:
-    st.markdown(
-        '<div class="brand"><div class="logo">◈</div>'
-        f'<div><div class="t">Gestion de Stock</div><div class="s">{esc(nom_boutique)}</div></div></div>',
-        unsafe_allow_html=True,
-    )
-logout_button()
+    sidebar_brand(nom_boutique)
+logout_button()  # la CSS place cette zone tout en bas de la barre latérale
 
-if not est_admin and paywall(user_id, user["email"], user.get("nom_boutique")):
+# Consentement à la politique de confidentialité (première connexion ou nouvelle version)
+if not consentement_a_jour(user):
+    ecran_consentement(engine, user)
+    st.stop()
+
+# Abonnement expiré : seuls l'écran d'abonnement et la page « Confidentialité & mes données » restent accessibles
+# (le droit d'exporter ou de supprimer ses données ne dépend pas du paiement)
+if not est_admin and not abonnement_info(user_id)["actif"]:
+    choix_bloque = st.sidebar.radio("Menu", ["🔓 Abonnement", "🔒 Confidentialité & mes données"],
+                                    key="menu_bloque", label_visibility="collapsed")
+    if choix_bloque == "🔓 Abonnement":
+        paywall(user_id, user["email"], user.get("nom_boutique"))
+    else:
+        page_confidentialite(engine, user_id, user)
     st.stop()
 
 with st.sidebar:
@@ -115,14 +127,14 @@ def enregistrer_mouvement(produit_id, produit_nom, type_mvt, quantite, motif):
 # ----------------------------------------------------------------------
 # GENERATION PDF
 # ----------------------------------------------------------------------
-COULEUR_ENTETE_PDF = colors.HexColor("#0B3D2E")
+COULEUR_ENTETE_PDF = colors.HexColor("#0E3A66")
 
 
 def generer_pdf_stock(df: pd.DataFrame) -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
     styles = getSampleStyleSheet()
-    elements = []
+    elements = [pdf_logo(), Spacer(1, 8)]
 
     elements.append(Paragraph(f"Rapport d'inventaire — {nom_boutique}", styles["Title"]))
     elements.append(Paragraph(f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}", styles["Normal"]))
@@ -161,7 +173,7 @@ def generer_pdf_mouvements(df: pd.DataFrame) -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
     styles = getSampleStyleSheet()
-    elements = []
+    elements = [pdf_logo(), Spacer(1, 8)]
 
     elements.append(Paragraph(f"Historique des mouvements de stock — {nom_boutique}", styles["Title"]))
     elements.append(Paragraph(f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}", styles["Normal"]))
@@ -198,6 +210,7 @@ PAGES = [
     "🔁 Entrée / Sortie de stock",
     "📦 Liste des produits",
     "🕘 Historique des mouvements",
+    "🔒 Confidentialité & mes données",
 ]
 page = st.sidebar.radio("Menu", PAGES, label_visibility="collapsed")
 
@@ -207,7 +220,7 @@ stock = charger_stock()
 # PAGE : TABLEAU DE BORD
 # ----------------------------------------------------------------------
 if page == PAGES[0]:
-    hero(f"Tableau de bord — {nom_boutique}", "Ton stock, tes alertes et tes crédits clients en un coup d'œil.", badge="En direct")
+    hero("Tableau de bord", f"{nom_boutique} · ton stock, tes alertes et tes crédits clients en un coup d'œil.", badge="En direct")
     show_flash()
 
     clients = lister_clients(engine, user_id)
@@ -215,20 +228,28 @@ if page == PAGES[0]:
 
     if stock.empty:
         kpi_grid([
-            {"label": "Produits", "value": "0", "tone": "mint"},
-            {"label": "Valeur du stock", "value": fcfa(0), "tone": "lime"},
-            {"label": "Alertes", "value": "0", "tone": "amber"},
-            {"label": "Crédits à recouvrer", "value": fcfa(total_credit), "tone": "coral"},
+            {"label": "Produits", "value": "0", "tone": "mint", "icon": "📦"},
+            {"label": "Valeur du stock", "value": fcfa(0), "tone": "lime", "icon": "💰"},
+            {"label": "Alertes", "value": "0", "tone": "amber", "icon": "⚠️"},
+            {"label": "Crédits à recouvrer", "value": fcfa(total_credit), "tone": "coral", "icon": "💳"},
         ])
         st.info("Aucun produit enregistré pour le moment. Ajoute ton premier produit dans le menu à gauche.")
     else:
         valeur_totale = float((stock["quantite"] * stock["prix_unitaire"]).sum())
         produits_alerte = stock[stock["quantite"] <= stock["seuil_alerte"]]
+        nb_debiteurs = int((clients["solde"] > 0).sum()) if not clients.empty else 0
+
+        defilant = [("coral" if p["quantite"] == 0 else "amber",
+                     f"{p['nom']} : {int(p['quantite'])} restant(s)") for _, p in produits_alerte.head(8).iterrows()]
+        if nb_debiteurs:
+            defilant.append(("coral", f"{nb_debiteurs} client(s) vous doivent {fcfa(total_credit)}"))
+        ticker(defilant or [("mint", "Tout est en ordre : aucun stock sous le seuil, aucun crédit en attente")])
+
         kpi_grid([
-            {"label": "Produits", "value": str(len(stock)), "tone": "mint", "sub": f"{int(stock['quantite'].sum())} unités en stock"},
-            {"label": "Valeur du stock", "value": fcfa(valeur_totale), "tone": "lime", "sub": "au prix de vente"},
-            {"label": "Alertes", "value": str(len(produits_alerte)), "tone": "amber", "sub": "à réapprovisionner"},
-            {"label": "Crédits à recouvrer", "value": fcfa(total_credit), "tone": "coral", "sub": f"{int((clients['solde'] > 0).sum()) if not clients.empty else 0} client(s)"},
+            {"label": "Produits", "value": str(len(stock)), "tone": "mint", "icon": "📦", "sub": f"{int(stock['quantite'].sum())} unités en stock"},
+            {"label": "Valeur du stock", "value": fcfa(valeur_totale), "tone": "lime", "icon": "💰", "sub": "au prix de vente"},
+            {"label": "Alertes", "value": str(len(produits_alerte)), "tone": "amber", "icon": "⚠️", "sub": "à réapprovisionner"},
+            {"label": "Crédits à recouvrer", "value": fcfa(total_credit), "tone": "coral", "icon": "💳", "sub": f"{nb_debiteurs} client(s)"},
         ])
 
         gauche, droite = st.columns([3, 2], gap="large")
@@ -236,10 +257,13 @@ if page == PAGES[0]:
             section("Quantité en stock par catégorie")
             par_categorie = stock.groupby("categorie")["quantite"].sum()
             try:
-                st.bar_chart(par_categorie, color="#00F5A0")
+                st.bar_chart(par_categorie, color="#1565C0")
             except TypeError:  # anciennes versions de Streamlit sans paramètre color
                 st.bar_chart(par_categorie)
         with droite:
+            section("Santé du stock")
+            sains = len(stock) - len(produits_alerte)
+            health_ring(100 * sains / len(stock), "Produits au-dessus du seuil", f"{sains} sur {len(stock)} sont bien approvisionnés")
             section("À réapprovisionner")
             if produits_alerte.empty:
                 st.caption("Rien à signaler, tous les stocks sont au-dessus du seuil.")
@@ -249,7 +273,7 @@ if page == PAGES[0]:
                                   "coral" if p["quantite"] == 0 else "amber")
                     for _, p in produits_alerte.head(6).iterrows()
                 ])
-            if not clients.empty and total_credit > 0:
+            if nb_debiteurs:
                 section("Top débiteurs")
                 render_rows([
                     row_card_html(c["nom"], c["telephone"] or "—", fcfa(c["solde"]), "coral")
@@ -388,3 +412,9 @@ elif page == PAGES[5]:
             mime="application/pdf",
             type="primary",
         )
+
+# ----------------------------------------------------------------------
+# PAGE : CONFIDENTIALITE & MES DONNEES
+# ----------------------------------------------------------------------
+elif page == PAGES[6]:
+    page_confidentialite(engine, user_id, user)

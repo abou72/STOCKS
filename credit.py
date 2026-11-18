@@ -17,7 +17,7 @@ from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
-from theme import (hero, section, kpi_grid, row_card_html, render_rows, show_flash, flash, esc, fcfa)
+from theme import (hero, section, kpi_grid, row_card_html, render_rows, show_flash, flash, esc, fcfa, pdf_logo)
 
 
 # ----------------------------------------------------------------------
@@ -148,6 +148,7 @@ def generer_pdf_releve(nom_boutique, client, historique: pd.DataFrame) -> bytes:
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
     styles = getSampleStyleSheet()
     elements = [
+        pdf_logo(), Spacer(1, 8),
         Paragraph(f"Relevé de compte — {client['nom']}", styles["Title"]),
         Paragraph(f"{nom_boutique} · généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}", styles["Normal"]),
         Spacer(1, 14),
@@ -163,7 +164,7 @@ def generer_pdf_releve(nom_boutique, client, historique: pd.DataFrame) -> bytes:
                      f"{o['solde_apres']:,.0f}", o["note"] or ""])
     table = Table(data, repeatRows=1)
     table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B3D2E")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0E3A66")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
@@ -188,11 +189,11 @@ def page_credit(engine, user_id, stock: pd.DataFrame, nom_boutique: str):
     total_du = float(debiteurs["solde"].sum()) if not debiteurs.empty else 0.0
     gros = debiteurs.iloc[0] if not debiteurs.empty else None
     kpi_grid([
-        {"label": "Total à recouvrer", "value": fcfa(total_du), "tone": "coral", "sub": "crédits non soldés"},
-        {"label": "Clients débiteurs", "value": str(len(debiteurs)), "tone": "amber", "sub": f"sur {len(clients)} client(s)"},
-        {"label": "Plus gros solde", "value": fcfa(gros["solde"]) if gros is not None else "—", "tone": "lime",
+        {"label": "Total à recouvrer", "value": fcfa(total_du), "tone": "coral", "icon": "💳", "sub": "crédits non soldés"},
+        {"label": "Clients débiteurs", "value": str(len(debiteurs)), "tone": "amber", "icon": "👥", "sub": f"sur {len(clients)} client(s)"},
+        {"label": "Plus gros solde", "value": fcfa(gros["solde"]) if gros is not None else "—", "tone": "lime", "icon": "🔥",
          "sub": gros["nom"] if gros is not None else "aucun crédit en cours"},
-        {"label": "Déjà remboursé", "value": fcfa(clients["total_rembourse"].sum() if not clients.empty else 0), "tone": "mint", "sub": "au total"},
+        {"label": "Déjà remboursé", "value": fcfa(clients["total_rembourse"].sum() if not clients.empty else 0), "tone": "mint", "icon": "✅", "sub": "au total"},
     ])
 
     onglet_soldes, onglet_op, onglet_fiche = st.tabs(["📒 Soldes", "➕ Nouvelle opération", "👤 Fiche client"])
@@ -231,6 +232,9 @@ def page_credit(engine, user_id, stock: pd.DataFrame, nom_boutique: str):
             c1, c2 = st.columns(2)
             nom_nouveau = c1.text_input("Nom du client", key="credit_nom_nouveau")
             tel_nouveau = c2.text_input("Téléphone (pour la relance WhatsApp)", key="credit_tel_nouveau")
+
+        if choix == 0:
+            st.caption("ℹ️ Informe ton client que son nom et son numéro sont enregistrés dans ton cahier de crédit (protection des données).")
 
         type_label = st.radio("Type d'opération", ["Crédit accordé", "Remboursement reçu"], horizontal=True, key="credit_type")
         est_dette = type_label == "Crédit accordé"

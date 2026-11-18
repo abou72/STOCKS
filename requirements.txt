@@ -1,8 +1,9 @@
 streamlit
 pandas
 reportlab
+pillow
+openpyxl
 sqlalchemy
 psycopg2-binary
 bcrypt
 requests
-psycopg[binary]

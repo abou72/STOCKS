@@ -58,6 +58,13 @@ def init_schema():
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE"))
         # Abonnement mensuel : date (UTC) jusqu'à laquelle l'accès est ouvert
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS paid_until TIMESTAMP"))
+        # Consentement à la politique de confidentialité (version acceptée + date)
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS consent_version TEXT"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS consent_at TIMESTAMP"))
+        # Les jetons de réinitialisation sont désormais stockés hachés (SHA-256 = 64 caractères hexadécimaux) :
+        # on efface ceux, éventuellement en clair, d'avant la migration
+        conn.execute(text("UPDATE users SET reset_token = NULL, reset_token_expires = NULL "
+                          "WHERE reset_token IS NOT NULL AND length(reset_token) <> 64"))
 
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS produits (
@@ -95,6 +102,23 @@ def init_schema():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """))
+
+        # Après suppression d'un compte, la trace du paiement est conservée sans identité (obligations comptables)
+        conn.execute(text("ALTER TABLE paiements_abonnement ALTER COLUMN user_id DROP NOT NULL"))
+
+        # --- Sécurité : compteurs de tentatives (clés hachées, jamais d'email en clair) ---
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS auth_throttle (
+                key TEXT PRIMARY KEY,
+                failed INTEGER NOT NULL DEFAULT 0,
+                lock_level INTEGER NOT NULL DEFAULT 0,
+                locked_until TIMESTAMP,
+                window_start TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT timezone('utc', now())
+            )
+        """))
+        conn.execute(text("DELETE FROM auth_throttle WHERE updated_at < timezone('utc', now()) - INTERVAL '30 days' "
+                          "AND (locked_until IS NULL OR locked_until < timezone('utc', now()))"))
 
         # --- Cahier de crédit ---
         conn.execute(text("""
